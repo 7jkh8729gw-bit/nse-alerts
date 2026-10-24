@@ -1,0 +1,18 @@
+# Install:  sudo cp deploy/nse-alerts.service /etc/systemd/system/
+#           (edit User and paths) then: sudo systemctl enable --now nse-alerts
+[Unit]
+Description=NSE breakout alert daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/nse_alerts_project
+EnvironmentFile=/home/ubuntu/nse_alerts_project/.env
+Environment=TZ=Asia/Kolkata
+ExecStart=/home/ubuntu/nse_alerts_project/venv/bin/python -m nse_alerts.run_day --daemon
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

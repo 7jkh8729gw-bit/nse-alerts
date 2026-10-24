@@ -1,0 +1,9 @@
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+upstox-python-sdk>=2.9      # Upstox live feed (default broker)
+# Only if you use BROKER=angel instead:
+# smartapi-python>=1.4
+# pyotp>=2.9
+# logzero>=1.7
+# websocket-client>=1.6
