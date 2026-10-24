@@ -1,0 +1,76 @@
+name: NSE Alerts
+on:
+  schedule:
+    - cron: "35 2 * * 1-5"   # 08:05 IST, Mon-Fri
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to run"
+        type: choice
+        options: [seed, selftest, session]
+        default: seed
+permissions:
+  contents: read
+env:
+  BROKER: upstox
+  DATA_DIR: data
+  BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+  CHAT_ID: ${{ secrets.CHAT_ID }}
+  UPSTOX_ANALYTICS_TOKEN: ${{ secrets.UPSTOX_ANALYTICS_TOKEN }}
+jobs:
+  seed:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'seed'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - run: python -m nse_alerts.premarket --seed-days 700
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: nse-data-${{ github.run_id }}
+  selftest:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'selftest'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - run: python -m nse_alerts.selftest
+  session:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'session')
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
+    concurrency:
+      group: nse-session
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: nse-data-${{ github.run_id }}
+          restore-keys: nse-data-
+      - id: run
+        run: python -m nse_alerts.run_day --once --max-minutes 345
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: nse-data-${{ github.run_id }}
+      - if: steps.run.outputs.resume == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run nse.yml -f action=session --repo "${{ github.repository }}"
