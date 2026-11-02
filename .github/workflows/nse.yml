@@ -1,14 +1,12 @@
 name: NSE Alerts
 on:
-  schedule:
-    - cron: "35 2 * * 1-5"   # 08:05 IST, Mon-Fri
   workflow_dispatch:
     inputs:
       action:
         description: "What to run"
         type: choice
-        options: [seed, selftest, session]
-        default: seed
+        options: [premarket, session, selftest, seed]
+        default: premarket
 permissions:
   contents: read
 env:
@@ -18,8 +16,28 @@ env:
   CHAT_ID: ${{ secrets.CHAT_ID }}
   UPSTOX_ANALYTICS_TOKEN: ${{ secrets.UPSTOX_ANALYTICS_TOKEN }}
 jobs:
+  premarket:
+    if: inputs.action == 'premarket'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: nse-data-${{ github.run_id }}
+          restore-keys: nse-data-
+      - run: python -m nse_alerts.premarket
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: nse-data-${{ github.run_id }}
   seed:
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'seed'
+    if: inputs.action == 'seed'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -34,7 +52,7 @@ jobs:
           path: data
           key: nse-data-${{ github.run_id }}
   selftest:
-    if: github.event_name == 'workflow_dispatch' && inputs.action == 'selftest'
+    if: inputs.action == 'selftest'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -44,7 +62,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m nse_alerts.selftest
   session:
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'session')
+    if: inputs.action == 'session'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
