@@ -3,7 +3,7 @@ a catalyst headline behind it (results, bonus/split, merger/deal, big order, buy
 
 Price/volume tests first (cheap), then a news check. No catalyst headline found = no alert
 (the stock is only listed in one end-of-day summary, so nothing is hidden and misses are visible).
-  EARLY  (+2% to +5%): last ~5 min volume pace >=3x normal, total >=2x, beating the market by 1.5%.
+  EARLY  (+2% to +5%): last ~5 min volume pace >=4x normal, total volume >=1.5x, beating the market by 1%.
   STRONG (+5% or more, e.g. an earnings gap): total volume >=3x normal.
 After an EARLY alert you get ONE follow-up if the stock reaches +5%. Headlines come from Google News
 RSS (best effort; it can miss or lag). INFORMATION ONLY - not a buy signal.
@@ -32,14 +32,14 @@ log = logging.getLogger("radar")
 STRONG_CHG = float(os.getenv("RADAR_MIN_CHG_PCT", "5.0"))   # % up: strong tier
 MIN_RVOL = float(os.getenv("RADAR_MIN_RVOL", "3.0"))        # strong tier: x normal volume so far today
 EARLY_CHG = float(os.getenv("RADAR_EARLY_CHG_PCT", "2.0"))  # % up: early tier starts here
-EARLY_RVOL = float(os.getenv("RADAR_EARLY_RVOL", "2.0"))    # early tier: total volume vs normal so far
-EARLY_ACCEL = float(os.getenv("RADAR_EARLY_ACCEL", "3.0"))  # early tier: last-5-min pace vs normal pace
-EARLY_REL = float(os.getenv("RADAR_EARLY_REL_PCT", "1.5"))  # early tier: must beat the market by this much
+EARLY_RVOL = float(os.getenv("RADAR_EARLY_RVOL", "1.5"))    # early tier: total volume vs normal so far
+EARLY_ACCEL = float(os.getenv("RADAR_EARLY_ACCEL", "4.0"))  # early tier: last-5-min pace vs normal pace
+EARLY_REL = float(os.getenv("RADAR_EARLY_REL_PCT", "1.0"))  # early tier: must beat the market by this much (0 = off)
 REQUIRE_CATALYST = os.getenv("RADAR_REQUIRE_CATALYST", "1") != "0"   # set 0 to alert without news too
 MAX_SYMBOLS = int(os.getenv("RADAR_MAX_SYMBOLS", "1200"))   # Upstox allows up to 2,000 per connection
-MAX_ALERTS = int(os.getenv("RADAR_MAX_ALERTS", "25"))       # strong alerts per day
-MAX_EARLY = int(os.getenv("RADAR_MAX_EARLY", "30"))         # early alerts per day
-NEWS_RECHECKS, NEWS_RECHECK_WAIT, NEWS_FAIL_WAIT = 3, 600, 120   # tries / seconds between tries
+MAX_ALERTS = int(os.getenv("RADAR_MAX_ALERTS", "10"))       # strong alerts per day
+MAX_EARLY = int(os.getenv("RADAR_MAX_EARLY", "10"))         # early alerts per day
+NEWS_RECHECKS, NEWS_RECHECK_WAIT, NEWS_FAIL_WAIT = 3, 180, 120   # tries / seconds between tries
 STATE_FILE = os.path.join(config.DATA_DIR, "radar_state.json")
 FIRST, LAST, SESSION_END = dtime(9, 16), dtime(15, 20), dtime(15, 31)
 EARLY_END = dtime(14, 30)                                   # no new EARLY alerts after this
@@ -61,11 +61,17 @@ CATALYSTS = [
     ("Fund raise", r"\b(qip|preferential (issue|allotment)|rights issue)\b"),
 ]
 _CAT_RX = [(name, re.compile(rx, re.I)) for name, rx in CATALYSTS]
+# pre-event / roundup headlines: they mention "results" etc. but are not a catalyst themselves
+_NOISE_RX = re.compile(r"\b(preview|what to expect|ahead of|to announce|will announce|board meeting|to consider|"
+                       r"stocks? to watch|stocks? in (the )?news|top gainers|top losers|buzzing stocks?|"
+                       r"results? date|earnings calendar)\b", re.I)
 ALIASES = {"LT": ["L&T", "Larsen"], "M&M": ["Mahindra"], "SBIN": ["SBI", "State Bank"], "ITC": []}
 
 
 def classify(title: str):
     """Catalyst category of a headline, or None."""
+    if _NOISE_RX.search(title):
+        return None
     for name, rx in _CAT_RX:
         if rx.search(title):
             return name
@@ -99,8 +105,8 @@ def build_universe(store, token_map: dict, limit: int = MAX_SYMBOLS) -> dict:
 
 
 # ---------------------------------------------------------------- headlines
-def fetch_headlines(symbol: str, n: int = 8, timeout: float = 6.0, max_age_h: float = 36.0):
-    """Recent (<=36h), relevant headline titles from Google News RSS. [] = searched, none found;
+def fetch_headlines(symbol: str, n: int = 8, timeout: float = 6.0, max_age_h: float = 24.0):
+    """Recent (<=24h), relevant headline titles from Google News RSS. [] = searched, none found;
     None = the search itself failed (blocked / network), so the caller can retry sooner."""
     try:
         r = requests.get("https://news.google.com/rss/search",
@@ -156,6 +162,7 @@ class Radar:
         self.market_prev = float((market or {}).get("prev_close") or 0)
         self.market_chg = None
         self.hl, self.open, self.hist, self.pending = {}, {}, {}, set()
+        self.first_cross, self.waited = {}, {}      # token -> time first above EARLY_CHG / reasons it waited
         self.ticks, self.last_tick_wall = 0, 0.0
         self.lock = threading.RLock()
         self._q = queue.Queue() if async_send else None
@@ -215,6 +222,8 @@ class Radar:
                 while hist and (ts - hist[0][0]).total_seconds() > 360:
                     hist.popleft()
             chg = (price / info["prev_close"] - 1) * 100
+            if chg >= EARLY_CHG:
+                self.first_cross.setdefault(tok, ts)
             st = self.state
             if sym in st["early"] and sym not in st["escalated"] and chg >= STRONG_CHG:
                 st["escalated"].append(sym)           # one follow-up for an EARLY name that kept running
@@ -230,11 +239,19 @@ class Radar:
                 if chg >= STRONG_CHG:
                     if rv >= MIN_RVOL and n_strong < MAX_ALERTS:
                         kind = "strong"
-                elif ts.time() <= EARLY_END and n_early < MAX_EARLY and rv >= EARLY_RVOL:
+                elif ts.time() > EARLY_END or n_early >= MAX_EARLY:
+                    self.waited.setdefault(tok, set()).add("time limit / daily cap")
+                elif rv < EARLY_RVOL:
+                    self.waited.setdefault(tok, set()).add("total volume")
+                else:
                     accel = volume_accel(hist, ts, info["avg_vol"])
                     mc = self.market_chg
-                    beats_market = mc is None or chg - max(mc, 0.0) >= EARLY_REL
-                    if accel is not None and accel >= EARLY_ACCEL and beats_market:
+                    beats_market = EARLY_REL <= 0 or mc is None or chg - max(mc, 0.0) >= EARLY_REL
+                    if accel is None or accel < EARLY_ACCEL:
+                        self.waited.setdefault(tok, set()).add("volume pace")
+                    elif not beats_market:
+                        self.waited.setdefault(tok, set()).add("market outperformance")
+                    else:
                         kind = "early"
                 if kind:
                     self.pending.add(sym)
@@ -245,7 +262,8 @@ class Radar:
                         gap=((t["day_open"] / info["prev_close"] - 1) * 100) if t.get("day_open") else None,
                         from_open=(price / o - 1) * 100 if o else None,
                         from_low=(price / h[1] - 1) * 100 if h[1] else None,
-                        vs_vwap=(price / vw - 1) * 100 if vw else None)
+                        vs_vwap=(price / vw - 1) * 100 if vw else None,
+                        crossed=self.first_cross.get(tok), waited=sorted(self.waited.get(tok, ())))
         if payload:
             if self._q is not None:
                 self._q.put(payload)
@@ -264,9 +282,7 @@ class Radar:
         if p["kind"] == "follow":
             since = (p["price"] / p["early_px"] - 1) * 100
             self.send(f"📈 <b>{sym}</b> is now <b>{p['chg']:+.1f}%</b> today (₹{p['price']:,.2f}), "
-                      f"<b>{since:+.1f}%</b> above its early alert price ₹{p['early_px']:,.2f}.\n"
-                      f"<i>Much of the early move may already be done; chasing now carries more "
-                      f"reversal risk.</i>", silent=True)
+                      f"<b>{since:+.1f}%</b> above its early alert price ₹{p['early_px']:,.2f}.", silent=True)
             return
         heads = self.headlines(p["sym"])                  # None = search failed, [] = nothing found
         tagged = [(classify(h), h) for h in (heads or [])]
@@ -280,11 +296,14 @@ class Radar:
                 st["nonews"][p["sym"]] = dict(
                     t=p["ts"].isoformat(), n=prev.get("n", 0) + (0 if failed else 1),
                     wait=NEWS_FAIL_WAIT if failed else NEWS_RECHECK_WAIT, failed=failed,
-                    chg=max(p["chg"], prev.get("chg", 0)), rv=p["rv"], time=p["ts"].strftime("%H:%M"))
+                    chg=max(p["chg"], prev.get("chg", 0)), rv=p["rv"], time=p["ts"].strftime("%H:%M"),
+                    first=prev.get("first", p["ts"].isoformat()))
                 self._save()
                 return
             if p["kind"] == "early" and len(st["early"]) >= MAX_EARLY:
                 return
+            first_trig = datetime.fromisoformat(st["nonews"][p["sym"]]["first"]) \
+                if p["sym"] in st["nonews"] and "first" in st["nonews"][p["sym"]] else p["ts"]
             st["alerted"].append(p["sym"])
             if p["kind"] == "early":
                 st["early"][p["sym"]] = p["price"]
@@ -299,19 +318,19 @@ class Radar:
                  + ("  — still early" if early else "")]
         if cats:
             lines.append("🏷️ Catalyst: <b>" + " / ".join(dict.fromkeys(c for c, _ in cats)) + "</b>")
+        timing = []
+        if p.get("crossed") and (p["ts"] - p["crossed"]).total_seconds() >= 120:
+            timing.append(f"first above +{EARLY_CHG:g}% at {p['crossed'].strftime('%H:%M')}")
+            if p.get("waited"):
+                timing.append("held back by " + ", ".join(p["waited"]))
+        if (p["ts"] - first_trig).total_seconds() >= 90:
+            timing.append(f"price/volume trigger met {first_trig.strftime('%H:%M')}, waited for news confirmation")
+        if timing:
+            lines.append("⏱ " + " · ".join(timing))
         vol = f"Volume: total ≈ <b>{p['rv']:.1f}×</b> normal for this time"
         if early and p.get("accel"):
             vol = f"Volume pace (last 5 min) ≈ <b>{p['accel']:.1f}×</b> normal · total ≈ {p['rv']:.1f}×"
         lines.append(vol)
-        ext = []
-        if p.get("from_open") is not None:
-            ext.append(f"from open {p['from_open']:+.1f}%")
-        if p.get("from_low") is not None:
-            ext.append(f"from day low {p['from_low']:+.1f}%")
-        if p.get("vs_vwap") is not None:
-            ext.append(f"vs VWAP {p['vs_vwap']:+.1f}%")
-        if ext:
-            lines.append("How far it has run: " + " · ".join(ext))
         if p.get("mkt") is not None:
             lines.append(f"Market proxy {p['mkt']:+.1f}%")
         if p["chg"] >= 9.5:
@@ -320,12 +339,7 @@ class Radar:
         if shown:
             lines.append("📰 Headlines:")
             lines += [f"• {notify.esc(h)}" for _, h in shown]
-        lines.append("<i>Information only, not a buy signal. Headlines come from a news search that can be "
-                     "wrong or late: verify the news yourself. " + (
-            "An early move can still fade: confirm with your own entry rules and skip it if it has already "
-            "jumped further." if early else
-            "Big moves can reverse; many traders wait for a pullback that holds above VWAP.") + "</i>")
-        self.send("\n".join(lines), silent=early)
+        self.send("\n".join(lines))
 
     def digest(self) -> str:
         """End-of-day summary: alerts sent, plus the movers skipped for lack of a catalyst headline."""
@@ -339,8 +353,7 @@ class Radar:
             names = " · ".join(f"{notify.esc(k)} {v['chg']:+.1f}%" + (" (news check failed)" if v.get("failed") else "")
                                for k, v in skipped[:12])
             more = f" …and {len(skipped) - 12} more" if len(skipped) > 12 else ""
-            txt += (f"\nMoved on volume but no catalyst headline found, so not alerted: {names}{more}\n"
-                    f"<i>My news search can miss things; check these yourself if you wish.</i>")
+            txt += f"\nMoved on volume, no catalyst headline found (not alerted): {names}{more}"
         return txt
 
 
