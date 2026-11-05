@@ -26,7 +26,7 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
-from . import broker, config, daily_store, engine as eng, notify, signals
+from . import broker, config, daily_store, engine as eng, notify, scoring, signals
 
 log = logging.getLogger("radar")
 STRONG_CHG = float(os.getenv("RADAR_MIN_CHG_PCT", "5.0"))   # % up: strong tier
@@ -133,6 +133,49 @@ def fetch_headlines(symbol: str, n: int = 8, timeout: float = 6.0, max_age_h: fl
         if len(out) >= n:
             break
     return out
+
+
+# ---------------------------------------------------------------- why did the breakout engine miss it?
+def gate_reason(f: dict):
+    """First breakout-watchlist filter a stock fails (from scoring features), or None if it passes all."""
+    if f["close"] < config.MIN_PRICE:
+        return f"price under ₹{config.MIN_PRICE:g}"
+    if f["median_turnover_cr"] < config.MIN_MEDIAN_TURNOVER_CR:
+        return "low traded value"
+    if f["close"] <= f["sma50"]:
+        return "below 50-day average"
+    if f["sma50"] <= f["sma200"]:
+        return "50-day below 200-day average"
+    if f["sma50_slope_pct"] <= 0:
+        return "50-day average falling"
+    if f["dist_52w_pct"] > config.MAX_DIST_TO_52W_HIGH_PCT:
+        return f"{f['dist_52w_pct']:.0f}% below 52-week high"
+    if f["dist_pivot_pct"] > config.MAX_DIST_TO_PIVOT_PCT:
+        return f"{f['dist_pivot_pct']:.0f}% below 20-day high"
+    if f["max_jump_pct"] >= config.JUMP_GUARD_PCT:
+        return "unexplained price jump in data"
+    if f["yday_chg_pct"] >= 12:
+        return "already +12% yesterday"
+    return None
+
+
+def explain_miss(groups: dict, context, sym: str, chg: float):
+    """(short tag, bucket) saying why the BREAKOUT engine did not alert on this mover."""
+    watch = {i["symbol"]: i["tier"] for i in (context or {}).get("items", [])}
+    if context is None:
+        return "watchlist unknown", "watchlist unknown"
+    if sym in watch:
+        if chg >= config.MAX_DAY_CHANGE_PCT:
+            return (f"on watchlist ({watch[sym]}) but past the +{config.MAX_DAY_CHANGE_PCT:g}% cap",
+                    "on watchlist, past the cap or entry zone")
+        return (f"on watchlist ({watch[sym]}) but outside entry zone / volume rules",
+                "on watchlist, past the cap or entry zone")
+    g = groups.get(sym)
+    f = scoring.symbol_features(g.sort_values("date")) if g is not None else None
+    if f is None:
+        return "not on watchlist (under 200 days of history)", "not on watchlist: short history"
+    reason = gate_reason(f) or "passed filters but missed the list"
+    return f"not on watchlist ({reason})", "not on watchlist: " + re.sub(r"\d+%", "N%", reason)
 
 
 # ---------------------------------------------------------------- radar
@@ -341,8 +384,9 @@ class Radar:
             lines += [f"• {notify.esc(h)}" for _, h in shown]
         self.send("\n".join(lines))
 
-    def digest(self) -> str:
-        """End-of-day summary: alerts sent, plus the movers skipped for lack of a catalyst headline."""
+    def digest(self, explain=None) -> str:
+        """End-of-day summary: alerts sent, plus the movers skipped for lack of a catalyst headline.
+        `explain(sym, chg) -> (tag, bucket)` adds why the breakout engine did not pick each one."""
         with self.lock:
             st = self.state
             skipped = sorted(st["nonews"].items(), key=lambda kv: -kv[1].get("chg", 0))
@@ -350,10 +394,19 @@ class Radar:
             return ""
         txt = f"📋 <b>Radar summary</b>: {len(st['alerted'])} alert(s) with a catalyst headline."
         if skipped:
-            names = " · ".join(f"{notify.esc(k)} {v['chg']:+.1f}%" + (" (news check failed)" if v.get("failed") else "")
-                               for k, v in skipped[:12])
-            more = f" …and {len(skipped) - 12} more" if len(skipped) > 12 else ""
-            txt += f"\nMoved on volume, no catalyst headline found (not alerted): {names}{more}"
+            tags = {k: (explain(k, v.get("chg", 0)) if explain else ("", "")) for k, v in skipped}
+            def line(k, v):
+                tag = tags[k][0]
+                return f"{notify.esc(k)} {v['chg']:+.1f}%" + (f" [{notify.esc(tag)}]" if tag else "") \
+                    + (" (news check failed)" if v.get("failed") else "")
+            shown = "\n".join(line(k, v) for k, v in skipped[:12])
+            more = f"\n…and {len(skipped) - 12} more" if len(skipped) > 12 else ""
+            txt += f"\nMoved on volume, no catalyst headline found (not alerted):\n{shown}{more}"
+            if explain:
+                from collections import Counter
+                buckets = Counter(b for _, b in tags.values())
+                top = "; ".join(f"{n} × {b}" for b, n in buckets.most_common(4))
+                txt += f"\nWhy the breakout engine missed all {len(skipped)}: {top}"
         return txt
 
 
@@ -391,7 +444,15 @@ def run(max_minutes: int = None) -> str:
             if stream:
                 stream.stop()
             time.sleep(10)                              # let in-flight news checks finish
-            summary = radar.digest()
+            try:
+                from . import premarket
+                ctx = premarket.load_today()
+                groups = {sym: g for sym, g in store.groupby("symbol")}
+                explain = lambda sym, chg: explain_miss(groups, ctx, sym, chg)
+            except Exception:
+                log.exception("explain setup failed")
+                explain = None
+            summary = radar.digest(explain)
             if summary:
                 notify.send(summary)
             return "done"
