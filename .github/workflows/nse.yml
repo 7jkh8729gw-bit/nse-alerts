@@ -5,7 +5,7 @@ on:
       action:
         description: "What to run"
         type: choice
-        options: [premarket, session, selftest, seed]
+        options: [premarket, session, radar, selftest, seed]
         default: premarket
 permissions:
   contents: read
@@ -30,6 +30,8 @@ jobs:
           path: data
           key: nse-data-${{ github.run_id }}
           restore-keys: nse-data-
+      - run: python -m nse_alerts.overnight
+        continue-on-error: true
       - run: python -m nse_alerts.premarket
       - if: always()
         uses: actions/cache/save@v4
@@ -61,6 +63,8 @@ jobs:
         with: { python-version: "3.11", cache: pip }
       - run: pip install -r requirements.txt
       - run: python -m nse_alerts.selftest
+      - run: python -m nse_alerts.overnight --print
+        continue-on-error: true
   session:
     if: inputs.action == 'session'
     runs-on: ubuntu-latest
@@ -92,3 +96,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run nse.yml -f action=session --repo "${{ github.repository }}"
+  radar:
+    if: inputs.action == 'radar'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
+    concurrency:
+      group: nse-radar
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: nse-data-${{ github.run_id }}
+          restore-keys: nse-data-
+      - id: run
+        run: python -m nse_alerts.radar --max-minutes 345
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: nse-data-${{ github.run_id }}
+      - if: steps.run.outputs.resume == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run nse.yml -f action=radar --repo "${{ github.repository }}"
