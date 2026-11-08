@@ -5,7 +5,7 @@ on:
       action:
         description: "What to run"
         type: choice
-        options: [premarket, session, radar, selftest, seed]
+        options: [premarket, session, catalyst, report, newstest, selftest, seed, unpack]
         default: premarket
 permissions:
   contents: read
@@ -16,6 +16,27 @@ env:
   CHAT_ID: ${{ secrets.CHAT_ID }}
   UPSTOX_ANALYTICS_TOKEN: ${{ secrets.UPSTOX_ANALYTICS_TOKEN }}
 jobs:
+  unpack:
+    if: inputs.action == 'unpack'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack the uploaded zip into nse_alerts
+        run: |
+          f=$(ls *.zip | head -n1)
+          unzip -q "$f" -d /tmp/pkg
+          d=$(ls -d /tmp/pkg/*/ | head -n1)
+          mkdir -p nse_alerts
+          cp -rf "${d}nse_alerts/." nse_alerts/
+          rm -f "$f"
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Update nse_alerts from uploaded zip" || echo "nothing changed"
+          git push
   premarket:
     if: inputs.action == 'premarket'
     runs-on: ubuntu-latest
@@ -33,11 +54,23 @@ jobs:
       - run: python -m nse_alerts.overnight
         continue-on-error: true
       - run: python -m nse_alerts.premarket
+      - run: python -m nse_alerts.news --collect
+        continue-on-error: true
       - if: always()
         uses: actions/cache/save@v4
         with:
           path: data
           key: nse-data-${{ github.run_id }}
+  newstest:
+    if: inputs.action == 'newstest'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - run: python -m nse_alerts.news --test
   seed:
     if: inputs.action == 'seed'
     runs-on: ubuntu-latest
@@ -85,26 +118,37 @@ jobs:
           path: data
           key: nse-data-${{ github.run_id }}
           restore-keys: nse-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/alert_state.json
+            data/alerts_log.csv
+          key: nse-sstate-${{ github.run_id }}
+          restore-keys: nse-sstate-
       - id: run
         run: python -m nse_alerts.run_day --once --max-minutes 345
       - if: always()
+        run: mkdir -p data && { [ -f data/alert_state.json ] || echo '{}' > data/alert_state.json; }
+      - if: always()
         uses: actions/cache/save@v4
         with:
-          path: data
-          key: nse-data-${{ github.run_id }}
+          path: |
+            data/alert_state.json
+            data/alerts_log.csv
+          key: nse-sstate-${{ github.run_id }}
       - if: steps.run.outputs.resume == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run nse.yml -f action=session --repo "${{ github.repository }}"
-  radar:
-    if: inputs.action == 'radar'
+  catalyst:
+    if: inputs.action == 'catalyst'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
       contents: read
       actions: write
     concurrency:
-      group: nse-radar
+      group: nse-catalyst
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
@@ -116,14 +160,69 @@ jobs:
           path: data
           key: nse-data-${{ github.run_id }}
           restore-keys: nse-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/catalyst_state.json
+            data/catalyst_log.csv
+            data/catalyst_watch.json
+          key: nse-cstate-${{ github.run_id }}
+          restore-keys: nse-cstate-
       - id: run
-        run: python -m nse_alerts.radar --max-minutes 345
+        run: python -m nse_alerts.catalyst --max-minutes 345
+      - if: always()
+        run: mkdir -p data && { [ -f data/catalyst_state.json ] || echo '{}' > data/catalyst_state.json; }
       - if: always()
         uses: actions/cache/save@v4
         with:
-          path: data
-          key: nse-data-${{ github.run_id }}
+          path: |
+            data/catalyst_state.json
+            data/catalyst_log.csv
+            data/catalyst_watch.json
+          key: nse-cstate-${{ github.run_id }}
       - if: steps.run.outputs.resume == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run nse.yml -f action=radar --repo "${{ github.repository }}"
+        run: gh workflow run nse.yml -f action=catalyst --repo "${{ github.repository }}"
+  report:
+    if: inputs.action == 'report'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r requirements.txt
+      - uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: nse-data-${{ github.run_id }}
+          restore-keys: nse-data-
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/alert_state.json
+            data/alerts_log.csv
+          key: nse-sstate-${{ github.run_id }}
+          restore-keys: nse-sstate-
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/catalyst_state.json
+            data/catalyst_log.csv
+            data/catalyst_watch.json
+          key: nse-cstate-${{ github.run_id }}
+          restore-keys: nse-cstate-
+      - uses: actions/cache/restore@v4
+        with:
+          path: results
+          key: nse-results-${{ github.run_id }}
+          restore-keys: nse-results-
+      - run: python -m nse_alerts.outcomes
+      - if: always()
+        run: mkdir -p results && touch results/.keep
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: results
+          key: nse-results-${{ github.run_id }}
