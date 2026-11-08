@@ -8,7 +8,7 @@ from datetime import timedelta
 
 import pandas as pd
 
-from . import broker, config, daily_store, notify, scoring
+from . import broker, config, daily_store, notify, scoring, upstox
 
 log = logging.getLogger("premarket")
 
@@ -31,7 +31,7 @@ def build_context(store: pd.DataFrame, token_map: dict) -> dict:
             pivot=round(float(r["pivot"]), 2), atr=round(float(r["atr"]), 3),
             atr_pct=round(float(r["atr_pct"]), 2), avg_vol20=float(r["avg_vol20"]),
             prev_close=round(float(r["close"]), 2), score=float(r["score"]), setup=r["setup"],
-            rs_rank=round(float(r["rs_rank"]), 1), dist_pivot_pct=round(float(r["dist_pivot_pct"]), 2)))
+            rs_rank=round(float(r["rs_rank"]), 1), dist_pivot_pct=round(float(r["dist_pivot_pct"]), 2), rank=int(i) + 1))
     market = None
     proxy = config.MARKET_PROXY_SYMBOL
     px = store[store["symbol"] == proxy].sort_values("date")
@@ -42,20 +42,18 @@ def build_context(store: pd.DataFrame, token_map: dict) -> dict:
                 market=market, items=items)
 
 
-def message(ctx: dict) -> str:
-    a = [i for i in ctx["items"] if i["tier"] == "A"]
-    n_b = len(ctx["items"]) - len(a)
-    lines = [f"🌅 <b>Pre-market watchlist · {config.now_ist().strftime('%a %d %b')}</b>",
-             f"Scanned whole NSE → {ctx['liquid']:,} liquid stocks → <b>{ctx['gated']}</b> in uptrend, "
-             f"near a breakout level.",
-             f"<b>{len(a)} A-list</b> (ranked) + {n_b} B-list are watched live from 09:15 "
-             f"(alerts from 09:30). Data as of {ctx['last_session']}.", ""]
-    for n, i in enumerate(a[:15], 1):
-        lines.append(f"{n}. <b>{notify.esc(i['symbol'])}</b> ₹{i['prev_close']:,.2f} → trigger "
-                     f"₹{i['pivot']:,.2f} (+{i['dist_pivot_pct']:.1f}%) · {i['score']:.0f} · {notify.esc(i['setup'])}")
-    if len(a) > 15:
-        lines.append(f"…and {len(a) - 15} more A-list names.")
-    return "\n".join(lines)
+def messages(ctx: dict, limit: int = None, max_chars: int = 3500) -> list:
+    """The morning breakout watchlist: only the top few, each with its rank and score. One message."""
+    limit = limit or config.WATCHLIST_SIZE
+    a = [i for i in ctx["items"] if i["tier"] == "A"][:limit]
+    lines = [f"📋 <b>Breakout watchlist · {config.now_ist().strftime('%a %d %b')}</b>",
+             f"Top {len(a)} of {ctx['gated']} candidates, ranked by score (out of 100)", ""]
+    for i in a:
+        lines.append(f"<b>#{i.get('rank', 0) or a.index(i) + 1} {notify.esc(i['symbol'])}</b> · score {i['score']:.0f}")
+        lines.append(f"₹{i['prev_close']:,.2f} → breakout above ₹{i['pivot']:,.2f} "
+                     f"(+{i['dist_pivot_pct']:.1f}%) · {notify.esc(i['setup'])}")
+    text = "\n".join(lines)
+    return [text[:max_chars]]
 
 
 def run(seed_days: int = None) -> dict:
@@ -71,7 +69,12 @@ def run(seed_days: int = None) -> dict:
     tmp = config.CONTEXT_FILE + ".tmp"
     json.dump(ctx, open(tmp, "w"), indent=1)
     os.replace(tmp, config.CONTEXT_FILE)
-    notify.send(message(ctx))
+    if config.BROKER == "upstox":                      # token expiry warning: once a day, only when close
+        left = upstox.token_days_left(config.UPSTOX_ANALYTICS_TOKEN)
+        if left is not None and left <= 14:
+            notify.send(f"⚠️ Your Upstox Analytics Token expires in {left} day(s). Generate a new one and update the secret.")
+    for part in messages(ctx):
+        notify.send(part)
     log.info("Context written: %d items (%d gated)", len(ctx["items"]), ctx["gated"])
     return ctx
 

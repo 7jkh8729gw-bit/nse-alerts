@@ -11,6 +11,7 @@ RSS (best effort; it can miss or lag). INFORMATION ONLY - not a buy signal.
     python -m nse_alerts.radar [--max-minutes 345]
 """
 import argparse
+import csv
 import json
 import logging
 import os
@@ -41,6 +42,7 @@ MAX_ALERTS = int(os.getenv("RADAR_MAX_ALERTS", "10"))       # strong alerts per 
 MAX_EARLY = int(os.getenv("RADAR_MAX_EARLY", "10"))         # early alerts per day
 NEWS_RECHECKS, NEWS_RECHECK_WAIT, NEWS_FAIL_WAIT = 3, 180, 120   # tries / seconds between tries
 STATE_FILE = os.path.join(config.DATA_DIR, "radar_state.json")
+LOG_FILE = os.path.join(config.DATA_DIR, "radar_log.csv")      # one row per alert, read by the outcome report
 FIRST, LAST, SESSION_END = dtime(9, 16), dtime(15, 20), dtime(15, 31)
 EARLY_END = dtime(14, 30)                                   # no new EARLY alerts after this
 ACCEL_WINDOW_S, MIN_SPAN_S = 300, 150
@@ -226,6 +228,20 @@ class Radar:
         json.dump(self.state, open(tmp, "w"))
         os.replace(tmp, self.state_path)
 
+    def _log_alert(self, p: dict, cats: list):
+        """Append the alert to radar_log.csv (for the after-close accuracy report). Never raises."""
+        try:
+            new = not os.path.exists(LOG_FILE)
+            with open(LOG_FILE, "a", newline="") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["date", "time", "symbol", "kind", "price", "chg", "rv", "accel", "catalyst"])
+                w.writerow([p["ts"].strftime("%Y-%m-%d"), p["ts"].strftime("%H:%M:%S"), p["sym"], p["kind"],
+                            round(p["price"], 2), round(p["chg"], 2), round(p["rv"], 2), round(p.get("accel") or 0, 2),
+                            "/".join(dict.fromkeys(c for c, _ in cats))])
+        except Exception:
+            log.exception("could not write radar log")
+
     def _may_check(self, sym: str, ts: datetime) -> bool:
         """False while a stock is waiting for its next news re-check (or has used them all)."""
         c = self.state["nonews"].get(sym)
@@ -352,6 +368,7 @@ class Radar:
                 st["early"][p["sym"]] = p["price"]
             st["nonews"].pop(p["sym"], None)
             self._save()
+            self._log_alert(p, cats)
         early = p["kind"] == "early"
         head = (f"🟡 <b>EARLY MOVER: {sym}</b>  ({p['ts'].strftime('%H:%M')})" if early
                 else f"🚀 <b>BIG MOVER: {sym}</b>  ({p['ts'].strftime('%H:%M')})")

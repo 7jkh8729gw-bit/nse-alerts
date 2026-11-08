@@ -104,8 +104,7 @@ def build_text(chosen: list, data: dict) -> str:
         parts.append(txt)
     if not parts:
         return ""
-    return ("🌍 <b>Overnight markets</b> (latest readings)\n" + " · ".join(parts) +
-            "\n<i>US markets are closed at this hour. Index data can lag 2–15 minutes.</i>")
+    return "🌍 <b>Global markets</b> · last session\n" + " · ".join(parts)
 
 
 def summary(show_raw: bool = False) -> str:

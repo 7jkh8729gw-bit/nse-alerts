@@ -169,7 +169,7 @@ class Engine:
                 b = st.bar
                 b.h, b.l, b.c = max(b.h, price), min(b.l, price), price
             self._check_position(sym, price, ts)
-            if ctx.tier == "A" and not st.headsup and sym not in self.state["alerted"]:
+            if config.HEADSUPS and ctx.tier == "A" and not st.headsup and sym not in self.state["alerted"]:
                 snap = Snap(price, st.cum_vol, st.vwap, st.orb_high, st.orb_low, st.day_open)
                 if signals.heads_up(ctx, snap, ts, self.market_change_pct):
                     st.headsup = True
@@ -224,18 +224,13 @@ class Engine:
                         tier=ctx.tier, event="ALERT", price=round(d.entry, 2), entry=round(d.entry, 2),
                         sl=round(d.sl, 2), t1=round(d.t1, 2), t2=round(d.t2, 2),
                         rvol=round(d.rvol, 2), score=ctx.score, setup=ctx.setup)
-        mk = f"{self.market_change_pct:+.2f}%" if self.market_change_pct is not None else "n/a"
+        rank = f"rank #{ctx.rank} · " if ctx.rank else ""
         self.say(
-            f"🟢 <b>BUY ALERT: {notify.esc(sym)}</b>  ({'A' if ctx.tier == 'A' else 'B'}-list)\n"
-            f"⏰ {ts.strftime('%H:%M')}  |  Price <b>₹{d.entry:,.2f}</b> ({d.day_change_pct:+.1f}% today)\n"
-            f"📈 Broke ₹{d.level:,.2f} — entry zone ₹{d.level:,.2f} to ₹{d.zone_hi:,.2f}\n"
-            f"🛑 Stop <b>₹{d.sl:,.2f}</b> (risk {d.risk_pct:.1f}%)\n"
-            f"🎯 T1 ₹{d.t1:,.2f} ({config.T1_R:g}R)   T2 ₹{d.t2:,.2f} ({config.T2_R:g}R)\n"
-            f"📊 {', '.join(d.tags)}\n"
-            f"🧭 Setup: {notify.esc(ctx.setup)} · score {ctx.score:.0f} · RS rank {ctx.rs_rank:.0f}\n"
-            f"🌐 Nifty proxy {mk}\n"
-            f"<i>If price is already above ₹{d.zone_hi:,.2f} when you read this, skip it. "
-            f"After T1, move stop to entry. Not financial advice.</i>")
+            f"🟢 <b>BUY ALERT: {notify.esc(sym)}</b>  ({rank}score {ctx.score:.0f})\n"
+            f"⏰ {ts.strftime('%H:%M')} · <b>₹{d.entry:,.2f}</b> ({d.day_change_pct:+.1f}% today)\n"
+            f"Entry zone ₹{d.level:,.2f}–₹{d.zone_hi:,.2f} · Stop <b>₹{d.sl:,.2f}</b> (risk {d.risk_pct:.1f}%)\n"
+            f"T1 ₹{d.t1:,.2f} · T2 ₹{d.t2:,.2f}\n"
+            f"{', '.join(d.tags)}")
 
     def _check_position(self, sym: str, price: float, ts: datetime):
         p = self.state["positions"].get(sym)
@@ -262,7 +257,8 @@ class Engine:
         self._save_state()
         self._log_event(date=ts.strftime("%Y-%m-%d"), time=ts.strftime("%H:%M:%S"), symbol=sym,
                         tier=tier, event=event, price=round(px, 2), r_multiple=round(r, 2))
-        self.say(text)
+        if config.FOLLOWUPS:
+            self.say(text)
 
     # ---------------- end of day ----------------
     def end_of_day(self):
@@ -287,9 +283,10 @@ class Engine:
             self._save_state()
             n = len(self.state["alerted"])
             body = "\n".join(lines) if lines else "No alerts today."
-            self.say(f"📋 <b>End of day {now.strftime('%d %b')}</b>: {n} alert(s), net {total_r:+.2f}R\n{body}\n"
-                     f"<i>Ticks processed: {self.ticks:,}. Top skip reasons: "
-                     f"{', '.join(f'{k} {v}' for k, v in self.reasons.most_common(4))}</i>")
+            if config.STATUS_MSGS:
+                self.say(f"📋 <b>End of day {now.strftime('%d %b')}</b>: {n} alert(s), net {total_r:+.2f}R\n{body}\n"
+                         f"<i>Ticks processed: {self.ticks:,}. Top skip reasons: "
+                         f"{', '.join(f'{k} {v}' for k, v in self.reasons.most_common(4))}</i>")
 
     def _outcomes(self):
         out = []

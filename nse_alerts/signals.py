@@ -81,6 +81,7 @@ class Ctx:
     setup: str = ""
     rs_rank: float = 0.0
     dist_pivot_pct: float = 0.0
+    rank: int = 0             # position in the morning ranking (1 = best)
 
 
 @dataclass

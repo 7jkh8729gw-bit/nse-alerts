@@ -78,6 +78,13 @@ MARKET_BLOCK_PCT = _f("MARKET_BLOCK_PCT", -0.8)              # Nifty proxy below
 MARKET_CAUTION_PCT = _f("MARKET_CAUTION_PCT", -0.3)          # below this: need extra volume
 MARKET_PROXY_SYMBOL = os.getenv("MARKET_PROXY_SYMBOL", "NIFTYBEES")
 
+# ---------------- Telegram noise control (defaults: quiet, only the messages you asked for) ----------------
+HEADSUPS = _i("HEADSUPS", 0)              # "about to break out" heads-ups
+FOLLOWUPS = _i("FOLLOWUPS", 0)            # live target / stop-loss messages (results still go in the evening summary)
+STATUS_MSGS = _i("STATUS_MSGS", 0)        # "monitor started", "feed stalled", end-of-day recap from the live engine
+WATCHLIST_SIZE = _i("WATCHLIST_SIZE", 5)  # stocks shown in the morning breakout watchlist message
+NEWS_MAX_ALERTS = _i("NEWS_MAX_ALERTS", 5)    # news-based buy alerts per day
+
 # ---------------- Plumbing ----------------
 WATCHDOG_STALE_SECONDS = _i("WATCHDOG_STALE_SECONDS", 90)
 MAX_BAR_AGE_SECONDS = _i("MAX_BAR_AGE_SECONDS", 180)         # never alert from a bar older than this

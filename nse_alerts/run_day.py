@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime, time as dtime, timedelta
 
-from . import broker, config, engine as eng, notify, premarket, upstox
+from . import broker, config, engine as eng, notify, premarket
 
 log = logging.getLogger("run_day")
 PREMARKET_AT, CONNECT_AT, SESSION_END = dtime(8, 10), dtime(9, 0), dtime(15, 31)
@@ -38,29 +38,26 @@ def _next_trading_morning_offset(now) -> int:
     return d
 
 
-def run_session(ctx: dict, deadline: datetime = None) -> str:
+def run_session(ctx: dict, deadline: datetime = None, engine_factory=None) -> str:
     """Returns 'done' | 'timeout' | 'holiday' | 'failed'."""
-    e = eng.Engine(ctx, send=lambda text, silent=False: notify.send(text, silent=silent),
-                   async_send=True, now_fn=lambda: config.now_ist())
+    e = engine_factory(ctx) if engine_factory else eng.Engine(
+        ctx, send=lambda text, silent=False: notify.send(text, silent=silent),
+        async_send=True, now_fn=lambda: config.now_ist())
     tokens = [i["token"] for i in ctx["items"]]
     if ctx.get("market"):
         tokens.append(str(ctx["market"]["token"]))
     client, stream = broker.make_client(), None
     failures, connected_at, last_warn = 0, 0.0, 0.0
-    note = ""
-    if config.BROKER == "upstox":
-        left = upstox.token_days_left(config.UPSTOX_ANALYTICS_TOKEN)
-        if left is not None and left <= 14:
-            note = f"\n⚠️ Your Upstox Analytics Token expires in {left} day(s): generate a new one and update .env."
-    notify.send(f"✅ <b>Live monitor started</b> · watching {len(ctx['items'])} stocks "
-                f"({sum(1 for i in ctx['items'] if i['tier'] == 'A')} A-list). "
-                f"Alerts 09:30–{config.ALERT_END.strftime('%H:%M')}.{note}", silent=True)
+    if config.STATUS_MSGS:
+        notify.send(f"✅ <b>Live monitor started</b> · watching {len(ctx['items'])} stocks "
+                    f"({sum(1 for i in ctx['items'] if i['tier'] == 'A')} A-list). "
+                    f"Alerts 09:30–{config.ALERT_END.strftime('%H:%M')}.", silent=True)
     boot_done = False
     zero_tick_reconnects = 0
 
     def warn(text, silent=False):
         nonlocal last_warn
-        if time.time() - last_warn > 600:        # at most one warning per 10 minutes
+        if config.STATUS_MSGS and time.time() - last_warn > 600:   # chatter only if switched on
             notify.send(text, silent=silent)
             last_warn = time.time()
 
@@ -158,7 +155,8 @@ def main():
     ap.add_argument("--max-minutes", type=int, default=None)
     a = ap.parse_args()
     if a.daemon:
-        notify.send("🤖 NSE alert daemon started.", silent=True)
+        if config.STATUS_MSGS:
+            notify.send("🤖 NSE alert daemon started.", silent=True)
         done_date = None
         while True:
             now = config.now_ist()
