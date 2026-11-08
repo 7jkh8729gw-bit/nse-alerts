@@ -7,6 +7,7 @@ whether results are 'good' from the text: the market's reaction does that.
   python -m nse_alerts.news --collect   # silently refresh data/catalyst_watch.json (used at 06:05)
 """
 import argparse
+import html
 import json
 import logging
 import os
@@ -42,10 +43,17 @@ _RULES = [
     ("Bonus / split", r"\bbonus (issue|shares?)\b|\bissue of bonus\b|\bstock split\b|\bsub-?division\b|"
                       r"\bsplit of (equity )?shares?\b"),
     ("Buyback", r"\bbuy[- ]?back\b"),
-    ("Merger / deal", r"\b(acquisition|acquires?|acquiring|amalgamation|merger|demerger|scheme of arrangement|"
-                      r"takeover|joint venture)\b"),
-    ("Approval", r"\b(usfda|fda approval|drug approval|regulatory approval|nclt approval|cci approval)\b"),
+    ("Merger / deal", r"\b(acquisition|acquires?|acquiring|acquired|amalgamation|merger|demerger|scheme of arrangement|"
+                      r"takeover|open offer|slump sale|business transfer)\b"),
+    ("Approval", r"\b(usfda|fda)\b.{0,60}\b(approv\w+|clearance)\b|\bANDA\b.{0,40}\bapprov\w+|"
+                 r"\bapproval (from|by) (the )?(usfda|fda|dcgi|cdsco|cci|nclt|sebi)\b"),
 ]
+# A "deal" only counts if it is material: a structural change, a big amount, or a controlling stake.
+# (Routine buys of a few shares in a group company are not catalysts.)
+_DEAL_STRONG = re.compile(r"\b(merger|amalgamation|demerger|scheme of arrangement|takeover|open offer|slump sale|"
+                          r"business transfer)\b", re.I)
+_STAKE = re.compile(r"\b(51|5[2-9]|[6-9]\d|100)(\.\d+)?\s?%|\b(controlling|majority) stake\b|"
+                    r"\bentire (stake|share ?capital)\b", re.I)
 _RULES = [(n, re.compile(rx, re.I)) for n, rx in _RULES]
 BASE_SCORE = {"Results": 3, "Big order": 3, "Buyback": 3, "Bonus / split": 2, "Merger / deal": 2, "Approval": 2}
 _AMOUNT = re.compile(r"(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d+)?)\s*(crore|cr|lakh|million|mn|billion|bn)\b", re.I)
@@ -71,6 +79,10 @@ def classify_announcement(subject: str, text: str = ""):
         if rx.search(blob):
             if name == "Big order" and _CANCEL.search(blob):
                 return None
+            if name == "Merger / deal":
+                amt = order_value_cr(blob)
+                if not (_DEAL_STRONG.search(blob) or (amt and amt >= 100) or _STAKE.search(blob)):
+                    continue                    # routine / vague: not a catalyst
             return name, order_value_cr(blob)
     return None
 
@@ -129,8 +141,9 @@ def fetch_nse(since: datetime, now: datetime, timeout: float = 20) -> list:
     out = []
     for it in items:
         out.append(dict(source="NSE", symbol=str(it.get("symbol") or "").strip().upper() or None,
-                        name=str(it.get("sm_name") or ""), subject=str(it.get("desc") or "").strip(),
-                        text=str(it.get("attchmntText") or "").strip(),
+                        name=html.unescape(str(it.get("sm_name") or "")),
+                        subject=html.unescape(str(it.get("desc") or "")).strip(),
+                        text=html.unescape(str(it.get("attchmntText") or "")).strip(),
                         ts=_parse_dt(it.get("an_dt") or it.get("sort_date"))))
     return out
 
@@ -153,9 +166,9 @@ def fetch_bse(since: datetime, now: datetime, max_pages: int = 40, timeout: floa
             if ts and ts < since:
                 old = True
                 continue
-            out.append(dict(source="BSE", symbol=None, name=str(it.get("SLONGNAME") or ""),
-                            subject=str(it.get("NEWSSUB") or it.get("HEADLINE") or "").strip(),
-                            text=f"{it.get('HEADLINE') or ''} {it.get('MORE') or ''}".strip(), ts=ts))
+            out.append(dict(source="BSE", symbol=None, name=html.unescape(str(it.get("SLONGNAME") or "")),
+                            subject=html.unescape(str(it.get("NEWSSUB") or it.get("HEADLINE") or "")).strip(),
+                            text=html.unescape(f"{it.get('HEADLINE') or ''} {it.get('MORE') or ''}").strip(), ts=ts))
         if old:
             break
     return out
