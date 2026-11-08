@@ -285,16 +285,23 @@ def diagnose() -> int:
             continue
         ok_any = ok_any or bool(anns)
         print(f"reachable. announcements returned: {len(anns)}")
-        by_cat, sample = {}, []
+        by_cat, examples = {}, {}
         for a in anns:
             c = classify_announcement(a["subject"], a["text"])
             if c:
                 by_cat[c[0]] = by_cat.get(c[0], 0) + 1
-                if len(sample) < 6:
-                    sample.append((c[0], a.get("symbol") or a.get("name"), a["subject"][:70], a.get("ts")))
+                if len(examples.setdefault(c[0], [])) < 4:
+                    examples[c[0]].append(a)
         print("catalysts by type:", by_cat or "none")
-        for cat, who, subj, ts in sample:
-            print(f"  [{cat}] {who} | {subj} | {ts:%d %b %H:%M}" if ts else f"  [{cat}] {who} | {subj}")
+        for cat, rows in examples.items():          # a few real examples of each type, to judge precision
+            print(f"  -- {cat} --")
+            for a in rows:
+                who = a.get("symbol") or a.get("name")
+                when = a["ts"].strftime("%d %b %H:%M") if a.get("ts") else ""
+                snippet = " ".join((a.get("text") or "").split())[:150]
+                print(f"  {who} | {a['subject'][:60]} | {when}")
+                if snippet:
+                    print(f"      \"{snippet}\"")
         if anns:
             print("fields in first record:", sorted(k for k, v in anns[0].items() if v))
         if name == "BSE" and anns:
