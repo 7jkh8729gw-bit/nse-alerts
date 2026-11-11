@@ -28,7 +28,7 @@ from .signals import Bar, Decision
 log = logging.getLogger("catalyst")
 NEWS_END = dtime(14, 30)
 MIN_CHG = float(os.getenv("NEWS_MIN_CHG_PCT", "1.0"))
-MAX_CHG = float(os.getenv("NEWS_MAX_CHG_PCT", "7.0"))
+MAX_CHG = float(os.getenv("NEWS_MAX_CHG_PCT", "4.0"))
 RVOL_MIN = float(os.getenv("NEWS_RVOL", "1.5"))
 ACCEL_MIN = float(os.getenv("NEWS_ACCEL", "3.0"))
 REFRESH_SECONDS = int(os.getenv("NEWS_REFRESH_SECONDS", "300"))
@@ -65,6 +65,11 @@ def evaluate_news(ctx, bar: Bar, prev_bars: list, snap, accel, market_chg, n_ale
     zone_hi = level * (1 + min(2.0, max(config.ZONE_MIN_PCT, 0.35 * ctx.atr_pct)) / 100)
     if price > zone_hi:
         return Decision(False, "extended beyond entry zone", level=level, zone_hi=zone_hi)
+    atr_pct = ctx.atr_pct if ctx.atr_pct > 0 else 2.0
+    if day / atr_pct > config.MAX_EXT_ATR:
+        return Decision(False, "extended vs normal daily range", level=level, zone_hi=zone_hi)
+    if snap.vwap and ((price / snap.vwap - 1) * 100) / atr_pct > config.MAX_VWAP_ATR:
+        return Decision(False, "stretched above VWAP", level=level)
     if snap.vwap and price <= snap.vwap:
         return Decision(False, "below VWAP", level=level)
     r = signals.rvol(snap.cum_vol, ctx.avg_vol20, bar.t)
@@ -77,7 +82,8 @@ def evaluate_news(ctx, bar: Bar, prev_bars: list, snap, accel, market_chg, n_ale
     risk = min(max(risk, price * config.MIN_RISK_PCT / 100), config.MAX_RISK_ATR * atr)
     return Decision(True, "BUY", entry=price, sl=price - risk, t1=price + config.T1_R * risk,
                     t2=price + config.T2_R * risk, risk_pct=risk / price * 100, level=level, zone_hi=zone_hi,
-                    rvol=r, day_change_pct=day, tags=[f"volume pace {accel:.1f}×", "above VWAP", "broke range high"])
+                    rvol=r, day_change_pct=day, tags=[f"volume pace {accel:.1f}×", "above VWAP", "broke range high"],
+                    metrics=signals.extension_metrics(price, ctx.prev_close, snap, level, atr_pct))
 
 
 class CatalystEngine(Engine):
@@ -122,6 +128,7 @@ class CatalystEngine(Engine):
         self.state["alerted"].append(sym)
         self.state["positions"][sym] = dict(entry=d.entry, sl=d.sl, sl_active=d.sl, t1=d.t1, t2=d.t2,
                                             risk=d.entry - d.sl, t1_hit=False, open=True, time=ts.strftime("%H:%M"))
+        self.state.setdefault("metrics", {})[sym] = dict(d.metrics, time=ts.strftime("%H:%M"))
         self._save_state()
         self._log_event(date=ts.strftime("%Y-%m-%d"), time=ts.strftime("%H:%M:%S"), symbol=sym, tier="N",
                         event="ALERT", price=round(d.entry, 2), entry=round(d.entry, 2), sl=round(d.sl, 2),

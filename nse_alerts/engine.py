@@ -219,6 +219,7 @@ class Engine:
         self.state["positions"][sym] = dict(entry=d.entry, sl=d.sl, sl_active=d.sl, t1=d.t1, t2=d.t2,
                                             risk=risk, t1_hit=False, open=True,
                                             time=ts.strftime("%H:%M"))
+        self.state.setdefault("metrics", {})[sym] = dict(d.metrics, time=ts.strftime("%H:%M"))
         self._save_state()
         self._log_event(date=ts.strftime("%Y-%m-%d"), time=ts.strftime("%H:%M:%S"), symbol=sym,
                         tier=ctx.tier, event="ALERT", price=round(d.entry, 2), entry=round(d.entry, 2),

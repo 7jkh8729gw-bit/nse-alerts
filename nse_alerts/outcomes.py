@@ -17,6 +17,7 @@ cumulative CSV is attached: keep it.
 """
 import argparse
 import csv
+import json
 import logging
 import os
 import sys
@@ -30,8 +31,11 @@ log = logging.getLogger("outcomes")
 RESULTS_DIR = os.getenv("RESULTS_DIR", "results")
 RESULTS = os.path.join(RESULTS_DIR, "alert_results.csv")
 SOURCES = [("breakout", config.ALERT_LOG), ("news", os.path.join(config.DATA_DIR, "catalyst_log.csv"))]
+STATES = {"breakout": config.STATE_FILE, "news": os.path.join(config.DATA_DIR, "catalyst_state.json")}
 FIELDS = ["date", "time", "system", "symbol", "tier", "setup", "score", "rvol", "entry", "sl", "t1", "t2",
-          "outcome", "r", "mfe_r", "mae_r", "minutes_to_outcome", "close_r"]
+          "outcome", "r", "mfe_r", "mae_r", "minutes_to_outcome", "close_r",
+          "day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct"]
+METRIC_KEYS = ["day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct"]
 TARGET_HIT = {"T2", "EOD_after_T1", "BE_STOP"}          # T1 was reached
 
 
@@ -79,6 +83,20 @@ def load_alerts(day: str) -> list:
             for r in csv.DictReader(open(path)):
                 if r.get("date") == day and r.get("event") == "ALERT":
                     out.append(dict(r, system=system))
+    return out
+
+
+def load_metrics(day: str) -> dict:
+    """{(system, symbol): how extended the entry was} from today's engine state files."""
+    out = {}
+    for system, path in STATES.items():
+        try:
+            st = json.load(open(path))
+        except Exception:
+            continue
+        if st.get("date") == day:
+            for sym, m in (st.get("metrics") or {}).items():
+                out[(system, sym)] = m
     return out
 
 
@@ -150,6 +168,21 @@ def running_text(all_rows: list) -> str:
     return f"Since start ({days} day{'s' if days != 1 else ''}): " + (" · ".join(parts) if parts else "no results yet")
 
 
+def extension_text(all_rows: list, min_rows: int = 6) -> str:
+    """Do alerts that had already run further do worse? Grouped by day's gain / the stock's normal daily range."""
+    rows = [(_f(r.get("ext_atr")), _f(r.get("r"))) for r in all_rows]
+    rows = [(e, r) for e, r in rows if e is not None and r is not None]
+    if len(rows) < min_rows:
+        return f"Extension check: collecting data ({len(rows)} alerts measured so far)"
+    buckets = [("under 0.5", 0, 0.5), ("0.5-0.9", 0.5, 0.9), ("0.9 and over", 0.9, 99)]
+    parts = []
+    for name, lo, hi in buckets:
+        sub = [r for e, r in rows if lo <= e < hi]
+        if sub:
+            parts.append(f"{name}: {len(sub)} alert{'s' if len(sub) != 1 else ''}, avg {sum(sub) / len(sub):+.2f}R")
+    return "By how far each stock had already run (day gain ÷ its normal daily range): " + " · ".join(parts)
+
+
 # ------------------------------------------------------------------ telegram + main
 def send_document(path: str, caption: str = "") -> bool:
     if not config.BOT_TOKEN or not config.CHAT_ID or not os.path.exists(path):
@@ -177,18 +210,20 @@ def run(day: str = None, weekly: bool = None, send: bool = True, client=None) ->
         tmap = broker.load_token_map()
         for sym in sorted(symbols):
             candles[sym] = client.candles(tmap[sym], "ONE_MINUTE", f"{day} 09:15", f"{day} 15:30") if sym in tmap else []
+    metrics = load_metrics(day)
     rows = []
     for a in alerts:
         res = engine_outcome(candles.get(a["symbol"], []), a["time"][:5], float(a["entry"]), float(a["sl"]),
                              float(a["t1"]), float(a["t2"]))
         rows.append(dict(date=day, time=a["time"][:5], system=a["system"], symbol=a["symbol"], tier=a.get("tier", ""),
                          setup=a.get("setup", ""), score=a.get("score", ""), rvol=a.get("rvol", ""), entry=a["entry"],
-                         sl=a["sl"], t1=a["t1"], t2=a["t2"], **res))
+                         sl=a["sl"], t1=a["t1"], t2=a["t2"], **res,
+                         **{k: metrics.get((a["system"], a["symbol"]), {}).get(k, "") for k in METRIC_KEYS}))
     all_rows = _merge(rows)
     text = daily_text(day, rows)
     is_weekly = (datetime.strptime(day, "%Y-%m-%d").weekday() == 4) if weekly is None else weekly
     if is_weekly:
-        text += "\n" + running_text(all_rows)
+        text += "\n" + running_text(all_rows) + "\n" + extension_text(all_rows)
     if send:
         notify.send(text)
         if is_weekly:

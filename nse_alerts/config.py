@@ -66,7 +66,11 @@ RVOL_MIN_A = _f("RVOL_MIN_A", 1.5)
 RVOL_MIN_B = _f("RVOL_MIN_B", 2.5)
 ZONE_MIN_PCT = _f("ZONE_MIN_PCT", 0.6)                       # entry zone above pivot: clamp(0.35*ATR%, 0.6, 1.5)
 ZONE_MAX_PCT = _f("ZONE_MAX_PCT", 1.5)
-MAX_DAY_CHANGE_PCT = _f("MAX_DAY_CHANGE_PCT", 8.0)           # near circuit = can't buy reliably
+MAX_DAY_CHANGE_PCT = _f("MAX_DAY_CHANGE_PCT", 5.0)           # hard cap on the day's gain at alert time
+# Extension, measured against the stock's OWN normal daily range (ATR%): a +3% move is huge for a 1.5% stock
+# and ordinary for a 4% stock. Alerts are blocked when the stock has already moved more than this.
+MAX_EXT_ATR = _f("MAX_EXT_ATR", 1.2)                         # day's gain / ATR%  (1.2 = 20% more than a normal day's range)
+MAX_VWAP_ATR = _f("MAX_VWAP_ATR", 1.0)                       # distance above VWAP / ATR%
 SL_BELOW_PIVOT_ATR = _f("SL_BELOW_PIVOT_ATR", 0.4)
 MAX_RISK_ATR = _f("MAX_RISK_ATR", 1.0)
 MIN_RISK_PCT = _f("MIN_RISK_PCT", 0.8)

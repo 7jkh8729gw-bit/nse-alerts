@@ -118,6 +118,7 @@ class Decision:
     rvol: float = 0.0
     day_change_pct: float = 0.0
     tags: list = field(default_factory=list)
+    metrics: dict = field(default_factory=dict)       # how extended the entry was (logged for later analysis)
 
 
 def rvol_threshold(ctx: Ctx, t: datetime, market_change_pct: float) -> float:
@@ -166,6 +167,12 @@ def evaluate(ctx: Ctx, bar: Bar, snap: Snap, market_change_pct: Optional[float],
     zone_hi = level * (1 + entry_zone_pct(ctx.atr_pct) / 100)
     if price > zone_hi:
         return Decision(False, "already extended beyond entry zone", level=level, zone_hi=zone_hi)
+    atr_pct = ctx.atr_pct if ctx.atr_pct > 0 else 2.0
+    ext = day_chg / atr_pct
+    if ext > config.MAX_EXT_ATR:
+        return Decision(False, "extended vs normal daily range", level=level, zone_hi=zone_hi)
+    if snap.vwap and ((price / snap.vwap - 1) * 100) / atr_pct > config.MAX_VWAP_ATR:
+        return Decision(False, "stretched above VWAP", level=level)
     if snap.vwap and price <= snap.vwap:
         return Decision(False, "below VWAP", level=level)
     r = rvol(snap.cum_vol, ctx.avg_vol20, t, knots)
@@ -182,7 +189,20 @@ def evaluate(ctx: Ctx, bar: Bar, snap: Snap, market_change_pct: Optional[float],
     tags += ["above VWAP", f"RVOL {r:.1f}x"]
     return Decision(True, "BUY", entry=price, sl=sl, t1=price + config.T1_R * risk,
                     t2=price + config.T2_R * risk, risk_pct=risk / price * 100,
-                    level=level, zone_hi=zone_hi, rvol=r, day_change_pct=day_chg, tags=tags)
+                    level=level, zone_hi=zone_hi, rvol=r, day_change_pct=day_chg, tags=tags,
+                    metrics=extension_metrics(price, ctx.prev_close, snap, level, atr_pct))
+
+
+def extension_metrics(price: float, prev_close: float, snap, level: float, atr_pct: float) -> dict:
+    """How far the stock had already run when we alerted (in % and in units of its normal daily range)."""
+    day = (price / prev_close - 1) * 100 if prev_close else 0.0
+    m = dict(day_chg_pct=round(day, 2), atr_pct=round(atr_pct, 2), ext_atr=round(day / atr_pct, 2),
+             above_level_pct=round((price / level - 1) * 100, 2) if level else None)
+    if snap.vwap:
+        m["vwap_atr"] = round(((price / snap.vwap - 1) * 100) / atr_pct, 2)
+    if snap.day_open:
+        m["from_open_pct"] = round((price / snap.day_open - 1) * 100, 2)
+    return m
 
 
 def heads_up(ctx: Ctx, snap: Snap, now: datetime, market_change_pct: Optional[float]) -> bool:
