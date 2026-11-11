@@ -34,8 +34,8 @@ SOURCES = [("breakout", config.ALERT_LOG), ("news", os.path.join(config.DATA_DIR
 STATES = {"breakout": config.STATE_FILE, "news": os.path.join(config.DATA_DIR, "catalyst_state.json")}
 FIELDS = ["date", "time", "system", "symbol", "tier", "setup", "score", "rvol", "entry", "sl", "t1", "t2",
           "outcome", "r", "mfe_r", "mae_r", "minutes_to_outcome", "close_r",
-          "day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct"]
-METRIC_KEYS = ["day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct"]
+          "day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct", "gap_pct", "above_pivot_pct"]
+METRIC_KEYS = ["day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct", "gap_pct", "above_pivot_pct"]
 TARGET_HIT = {"T2", "EOD_after_T1", "BE_STOP"}          # T1 was reached
 
 
@@ -183,6 +183,20 @@ def extension_text(all_rows: list, min_rows: int = 6) -> str:
     return "By how far each stock had already run (day gain ÷ its normal daily range): " + " · ".join(parts)
 
 
+def gap_text(all_rows: list, min_rows: int = 6) -> str:
+    """Gap-up continuation vs breakout that happened during the session."""
+    rows = [(_f(r.get("gap_pct")), _f(r.get("r")), r.get("system")) for r in all_rows if r.get("system") == "breakout"]
+    rows = [(g, r) for g, r, _ in rows if g is not None and r is not None]
+    if len(rows) < min_rows:
+        return ""
+    parts = []
+    for name, test in (("gapped up 1%+ at the open", lambda g: g >= 1.0), ("no big gap", lambda g: g < 1.0)):
+        sub = [r for g, r in rows if test(g)]
+        if sub:
+            parts.append(f"{name}: {len(sub)} alert{'s' if len(sub) != 1 else ''}, avg {sum(sub) / len(sub):+.2f}R")
+    return "Breakout alerts by opening gap: " + " · ".join(parts)
+
+
 # ------------------------------------------------------------------ telegram + main
 def send_document(path: str, caption: str = "") -> bool:
     if not config.BOT_TOKEN or not config.CHAT_ID or not os.path.exists(path):
@@ -224,6 +238,9 @@ def run(day: str = None, weekly: bool = None, send: bool = True, client=None) ->
     is_weekly = (datetime.strptime(day, "%Y-%m-%d").weekday() == 4) if weekly is None else weekly
     if is_weekly:
         text += "\n" + running_text(all_rows) + "\n" + extension_text(all_rows)
+        g = gap_text(all_rows)
+        if g:
+            text += "\n" + g
     if send:
         notify.send(text)
         if is_weekly:

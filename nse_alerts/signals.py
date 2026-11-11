@@ -190,10 +190,10 @@ def evaluate(ctx: Ctx, bar: Bar, snap: Snap, market_change_pct: Optional[float],
     return Decision(True, "BUY", entry=price, sl=sl, t1=price + config.T1_R * risk,
                     t2=price + config.T2_R * risk, risk_pct=risk / price * 100,
                     level=level, zone_hi=zone_hi, rvol=r, day_change_pct=day_chg, tags=tags,
-                    metrics=extension_metrics(price, ctx.prev_close, snap, level, atr_pct))
+                    metrics=extension_metrics(price, ctx.prev_close, snap, level, atr_pct, ctx.pivot))
 
 
-def extension_metrics(price: float, prev_close: float, snap, level: float, atr_pct: float) -> dict:
+def extension_metrics(price: float, prev_close: float, snap, level: float, atr_pct: float, pivot: float = None) -> dict:
     """How far the stock had already run when we alerted (in % and in units of its normal daily range)."""
     day = (price / prev_close - 1) * 100 if prev_close else 0.0
     m = dict(day_chg_pct=round(day, 2), atr_pct=round(atr_pct, 2), ext_atr=round(day / atr_pct, 2),
@@ -202,6 +202,10 @@ def extension_metrics(price: float, prev_close: float, snap, level: float, atr_p
         m["vwap_atr"] = round(((price / snap.vwap - 1) * 100) / atr_pct, 2)
     if snap.day_open:
         m["from_open_pct"] = round((price / snap.day_open - 1) * 100, 2)
+        if prev_close:
+            m["gap_pct"] = round((snap.day_open / prev_close - 1) * 100, 2)      # opening gap vs yesterday's close
+    if pivot:
+        m["above_pivot_pct"] = round((price / pivot - 1) * 100, 2)               # distance above the 20-day high
     return m
 
 
