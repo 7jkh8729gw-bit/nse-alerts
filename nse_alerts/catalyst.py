@@ -115,6 +115,10 @@ class CatalystEngine(Engine):
         hist.append((end, st.cum_vol))
         if sym in self.state["alerted"]:
             return
+        paused = self.long_alerts_paused()
+        if paused:
+            self.reasons[paused] += 1
+            return
         snap = signals.Snap(bar.c, st.cum_vol, st.vwap, st.orb_high, st.orb_low, st.day_open)
         accel = radar.volume_accel(hist, end, ctx.avg_vol20)
         d = evaluate_news(ctx, bar, prev_bars, snap, accel, self.market_change_pct, len(self.state["alerted"]))

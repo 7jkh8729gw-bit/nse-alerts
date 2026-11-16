@@ -34,9 +34,10 @@ SOURCES = [("breakout", config.ALERT_LOG), ("news", os.path.join(config.DATA_DIR
 STATES = {"breakout": config.STATE_FILE, "news": os.path.join(config.DATA_DIR, "catalyst_state.json")}
 FIELDS = ["date", "time", "system", "symbol", "tier", "setup", "score", "rvol", "entry", "sl", "t1", "t2",
           "outcome", "r", "mfe_r", "mae_r", "minutes_to_outcome", "close_r",
-          "day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct", "gap_pct", "above_pivot_pct"]
+          "day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct", "gap_pct", "above_pivot_pct", "market_day_pct"]
 METRIC_KEYS = ["day_chg_pct", "atr_pct", "ext_atr", "vwap_atr", "above_level_pct", "from_open_pct", "gap_pct", "above_pivot_pct"]
 TARGET_HIT = {"T2", "EOD_after_T1", "BE_STOP"}          # T1 was reached
+RISK_PER_TRADE_RS = float(os.getenv("RISK_PER_TRADE_RS", "0") or 0)     # optional: show the day's result in rupees
 
 
 # ------------------------------------------------------------------ candle maths (pure)
@@ -123,8 +124,16 @@ def _f(x):
         return None
 
 
+def row_pct(r: dict) -> float:
+    """The alert's result as a % move of the entry price (result in R x the % distance to the stop)."""
+    entry, sl, res = _f(r.get("entry")), _f(r.get("sl")), _f(r.get("r"))
+    if not entry or sl is None or res is None:
+        return 0.0
+    return res * (entry - sl) / entry * 100
+
+
 def tally(rows: list) -> dict:
-    t = dict(n=len(rows), target=0, stop=0, neither=0, unknown=0, net_r=0.0)
+    t = dict(n=len(rows), target=0, stop=0, neither=0, unknown=0, net_r=0.0, pct=0.0)
     for r in rows:
         o = r.get("outcome", "")
         t["target"] += o in TARGET_HIT
@@ -132,6 +141,7 @@ def tally(rows: list) -> dict:
         t["neither"] += o == "EOD"
         t["unknown"] += o in ("NO_DATA", "")
         t["net_r"] += _f(r.get("r")) or 0.0
+        t["pct"] += row_pct(r)
     return t
 
 
@@ -143,16 +153,22 @@ def _line(label: str, t: dict) -> str:
     return s + (f" · {t['unknown']} no data" if t["unknown"] else "")
 
 
-def daily_text(day: str, rows: list) -> str:
+def daily_text(day: str, rows: list, market_pct=None) -> str:
     d = datetime.strptime(day, "%Y-%m-%d").strftime("%a %d %b")
     if not rows:
         return f"📊 <b>Day summary · {d}</b>\nNo alerts today."
     lines = [f"📊 <b>Day summary · {d}</b>"]
+    if market_pct is not None:
+        lines.append(f"Market (Nifty proxy): {market_pct:+.1f}% today")
     for system, label in (("breakout", "Breakout"), ("news", "News")):
         lines.append(_line(label, tally([r for r in rows if r["system"] == system])))
     tot = tally(rows)
-    lines.append(f"Total: {tot['n']} alert{'s' if tot['n'] != 1 else ''} · {tot['target']} target hit · "
-                 f"{tot['stop']} stop-loss · net {tot['net_r']:+.1f}R")
+    total = (f"Total: {tot['n']} alert{'s' if tot['n'] != 1 else ''} · {tot['target']} target hit · "
+             f"{tot['stop']} stop-loss · net {tot['net_r']:+.1f}R ({tot['pct']:+.1f}% summed")
+    if RISK_PER_TRADE_RS:
+        rs = tot["net_r"] * RISK_PER_TRADE_RS
+        total += f", about {'+' if rs >= 0 else '-'}₹{abs(rs):,.0f} at ₹{RISK_PER_TRADE_RS:,.0f} risk per alert"
+    lines.append(total + ")")
     return "\n".join(lines)
 
 
@@ -222,9 +238,11 @@ def run(day: str = None, weekly: bool = None, send: bool = True, client=None) ->
         client = client or broker.make_client()
         client.login()
         tmap = broker.load_token_map()
-        for sym in sorted(symbols):
+        for sym in sorted(symbols | {config.MARKET_PROXY_SYMBOL}):
             candles[sym] = client.candles(tmap[sym], "ONE_MINUTE", f"{day} 09:15", f"{day} 15:30") if sym in tmap else []
     metrics = load_metrics(day)
+    mk = candles.get(config.MARKET_PROXY_SYMBOL) or []
+    market_pct = round((float(mk[-1][4]) / float(mk[0][1]) - 1) * 100, 2) if mk and float(mk[0][1]) else None
     rows = []
     for a in alerts:
         res = engine_outcome(candles.get(a["symbol"], []), a["time"][:5], float(a["entry"]), float(a["sl"]),
@@ -232,9 +250,10 @@ def run(day: str = None, weekly: bool = None, send: bool = True, client=None) ->
         rows.append(dict(date=day, time=a["time"][:5], system=a["system"], symbol=a["symbol"], tier=a.get("tier", ""),
                          setup=a.get("setup", ""), score=a.get("score", ""), rvol=a.get("rvol", ""), entry=a["entry"],
                          sl=a["sl"], t1=a["t1"], t2=a["t2"], **res,
-                         **{k: metrics.get((a["system"], a["symbol"]), {}).get(k, "") for k in METRIC_KEYS}))
+                         **{k: metrics.get((a["system"], a["symbol"]), {}).get(k, "") for k in METRIC_KEYS},
+                         market_day_pct="" if market_pct is None else market_pct))
     all_rows = _merge(rows)
-    text = daily_text(day, rows)
+    text = daily_text(day, rows, market_pct)
     is_weekly = (datetime.strptime(day, "%Y-%m-%d").weekday() == 4) if weekly is None else weekly
     if is_weekly:
         text += "\n" + running_text(all_rows) + "\n" + extension_text(all_rows)

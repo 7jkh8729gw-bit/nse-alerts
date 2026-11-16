@@ -78,8 +78,9 @@ T1_R = _f("T1_R", 1.5)
 T2_R = _f("T2_R", 3.0)
 MAX_ALERTS_PER_DAY = _i("MAX_ALERTS_PER_DAY", 10)
 MAX_B_ALERTS_PER_DAY = _i("MAX_B_ALERTS_PER_DAY", 4)
-MARKET_BLOCK_PCT = _f("MARKET_BLOCK_PCT", -0.8)              # Nifty proxy below this: no new alerts
-MARKET_CAUTION_PCT = _f("MARKET_CAUTION_PCT", -0.3)          # below this: need extra volume
+MARKET_BLOCK_PCT = _f("MARKET_BLOCK_PCT", -0.4)              # Nifty proxy below this: no new buy alerts
+MARKET_CAUTION_PCT = _f("MARKET_CAUTION_PCT", -0.15)         # below this: need extra volume
+MAX_STOPS_PER_DAY = _i("MAX_STOPS_PER_DAY", 2)               # circuit breaker: after this many stop-losses, no more buy alerts today
 MARKET_PROXY_SYMBOL = os.getenv("MARKET_PROXY_SYMBOL", "NIFTYBEES")
 
 # ---------------- Telegram noise control (defaults: quiet, only the messages you asked for) ----------------

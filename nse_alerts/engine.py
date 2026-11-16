@@ -71,6 +71,7 @@ class Engine:
         self.market_token = str(mk.get("token", ""))
         self.market_prev_close = float(mk.get("prev_close") or 0)
         self.market_change_pct: Optional[float] = None
+        self.market_price, self.market_vwap = 0.0, 0.0
         self.s = {sym: SymState() for sym in self.ctx}
         self.now_fn = now_fn
         self.state_path = state_path or config.STATE_FILE
@@ -111,7 +112,7 @@ class Engine:
         except Exception as e:
             log.warning("state unreadable: %s", e)
         if st.get("date") != today:
-            st = {"date": today, "alerted": [], "headsup": [], "b_count": 0, "positions": {}}
+            st = {"date": today, "alerted": [], "headsup": [], "b_count": 0, "positions": {}, "stops": 0}
         self.state = st
         for sym in st["headsup"]:
             if sym in self.s:
@@ -144,6 +145,7 @@ class Engine:
             if t["token"] == self.market_token:
                 if self.market_prev_close > 0:
                     self.market_change_pct = (t["price"] / self.market_prev_close - 1) * 100
+                    self.market_price, self.market_vwap = t["price"], t["vwap"] or 0.0
                 return
             sym = self.by_token.get(t["token"])
             if not sym:
@@ -184,6 +186,18 @@ class Engine:
     def _in_session(ts: datetime, now: datetime) -> bool:
         return ts.date() == now.date() and MARKET_OPEN <= ts.time() <= MARKET_CLOSE
 
+    def long_alerts_paused(self):
+        """Reason new BUY alerts are paused right now (weak market trend / daily stop-loss limit), else None."""
+        c = self.market_change_pct
+        if c is not None:
+            if c <= config.MARKET_BLOCK_PCT:
+                return "market weak"
+            if c < 0 and self.market_vwap and self.market_price < self.market_vwap * 0.999:
+                return "market below its VWAP"
+        if self.state.get("stops", 0) >= config.MAX_STOPS_PER_DAY:
+            return "circuit breaker (stop-loss limit)"
+        return None
+
     def tick_clock(self):
         """Close bars whose minute has passed even if no newer tick arrived."""
         now = self.now_fn()
@@ -201,6 +215,10 @@ class Engine:
             return
         if (self.now_fn() - bar.t).total_seconds() > config.MAX_BAR_AGE_SECONDS:
             self.reasons["stale bar (late data)"] += 1     # backlog after reconnect/slow start
+            return
+        paused = self.long_alerts_paused()
+        if paused:
+            self.reasons[paused] += 1
             return
         snap = Snap(bar.c, st.cum_vol, st.vwap, st.orb_high, st.orb_low, st.day_open)
         d = signals.evaluate(ctx, bar, snap, self.market_change_pct,
@@ -242,6 +260,8 @@ class Engine:
             r = (p["sl_active"] - p["entry"]) / risk
             p["open"] = False
             ev, txt = ("BE_STOP", "stopped at breakeven after T1") if p["t1_hit"] else ("SL", "stop-loss hit")
+            if not p["t1_hit"]:
+                self.state["stops"] = self.state.get("stops", 0) + 1
             self._close_pos(sym, tier, ev, p["sl_active"], r, ts, f"🔴 {notify.esc(sym)}: {txt} (₹{price:,.2f}, {r:+.2f}R)")
         elif price >= p["t2"]:
             p["open"] = False
